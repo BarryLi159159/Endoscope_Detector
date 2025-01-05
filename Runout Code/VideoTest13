@@ -1,0 +1,446 @@
+import cv2
+import numpy as np
+import time
+import csv
+import json
+from pypylon import pylon
+import tkinter as tk
+from tkinter import ttk
+import DummyTest as SimplifiedControls
+import os
+
+
+# Define default ROI and processing parameters
+ROI_X, ROI_Y, ROI_WIDTH, ROI_HEIGHT = 430, 800, 3000, 500
+blur_value, block_size, C, Dila, maxValue = 7, 7, 2, 1,255
+
+# Load camera calibration data
+__location__ = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
+with open(os.path.join(__location__, 'Basler_Calibration_4_10_2024.json')) as f:
+    calibration_data = json.load(f)
+PPMMw = calibration_data['PPMMx']
+PPMMh = calibration_data['PPMMy']
+camera_matrix = np.array(calibration_data['Camera_Matrix'])
+dist_coeffs = np.array(calibration_data['Distortion_Coefficients'])
+
+
+def capture_and_adjust_roi():
+    global ROI_X, ROI_Y, ROI_WIDTH, ROI_HEIGHT
+
+    # Initialize the pylon camera
+    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+    camera.Open()
+    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+    converter = pylon.ImageFormatConverter()
+    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+    if camera.IsGrabbing():
+        grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+        if grabResult.GrabSucceeded():
+            image = converter.Convert(grabResult)
+            frame = image.GetArray()
+            grabResult.Release()
+            camera.Close()
+        else:
+            print("Error: Could not capture an image.")
+            camera.Close()
+            return None
+    else:
+        print("Error: Camera is not grabbing.")
+        camera.Close()
+        return None
+
+    resized_image = cv2.resize(frame, (960, 540))  # Resize image for ROI adjustment
+    cv2.namedWindow("Select ROI")
+
+    def update_roi(event, x, y, flags, param):
+        global ROI_X, ROI_Y
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # Adjust x, y coordinates according to resized image
+            ROI_X, ROI_Y = int(x * (frame.shape[1] / 960)), int(y * (frame.shape[0] / 540))
+            print(f"Updated ROI_X: {ROI_X}, ROI_Y: {ROI_Y}")  # Debug print
+
+    cv2.setMouseCallback("Select ROI", update_roi)
+
+    while True:
+        roi_image = resized_image.copy()
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('a'):  # 'A' key
+            # Move left side of ROI to the left (if it doesn't exceed image boundaries)
+            if ROI_X - 10 >= 0:
+                ROI_X -= 10  # Move ROI start to the left
+                ROI_WIDTH += 10  # Increase width to keep right side fixed
+        elif key == ord('d'):  # 'D' key
+            # Move left side of ROI to the right (reduce width but prevent it from becoming too small)
+            if ROI_WIDTH - 10 > 10:  # Assuming 10 pixels is the minimum width we want for the ROI
+                ROI_X += 10  # Move ROI start to the right
+                ROI_WIDTH -= 10  # Decrease width to keep right side fixed
+        elif key == 13:  # Enter key
+            break
+
+        # Draw ROI rectangle on the resized image
+        cv2.rectangle(roi_image,
+                      (int(ROI_X * (960 / frame.shape[1])), int(ROI_Y * (540 / frame.shape[0]))),
+                      (int((ROI_X + ROI_WIDTH) * (960 / frame.shape[1])),
+                       int((ROI_Y + ROI_HEIGHT) * (540 / frame.shape[0]))),
+                      (0, 255, 0), 2)
+        cv2.imshow("Select ROI", roi_image)
+
+    cv2.destroyAllWindows()
+    return ROI_X, ROI_Y, ROI_WIDTH, ROI_HEIGHT
+
+
+# # Call capture_and_adjust_roi() to adjust the ROI before starting video processing
+roi_coords = capture_and_adjust_roi()
+ROI_X, ROI_Y, ROI_WIDTH, ROI_HEIGHT = roi_coords
+
+highest_point_time = 0  # Time when the highest point was detected
+rotation_started = False
+rotation_completed = False
+rotation_start_time = 0  # Time when rotation started
+delay = 0
+
+
+def process_frame(frame, current_time):
+    global highest_point_within_roi, highest_point_time, rotation_completed, delay
+
+    # Convert frame to grayscale and apply Gaussian blur
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (blur_value, blur_value), 0)
+    # Apply adaptive threshold and mask for ROI
+    thresh = cv2.adaptiveThreshold(blurred, maxValue, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size,
+                                   C)
+    mask = np.zeros_like(gray)
+    mask[ROI_Y:ROI_Y + ROI_HEIGHT, ROI_X:ROI_X + ROI_WIDTH] = 255
+    masked_thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
+    # Dilate the image to connect components
+    dilated = cv2.dilate(masked_thresh, np.ones((Dila, Dila), np.uint8), iterations=1)
+    # Find contours
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Assuming the largest contour is the endoscope
+    if contours:
+        largest_contour = max(contours, key=cv2.contourArea)
+        # Find the highest point on the largest contour
+        highest_point = min(largest_contour, key=lambda x: x[0][1])
+
+        highest_point = (highest_point[0][0], highest_point[0][1])  # Convert to (x, y) format
+
+        if highest_point[1] < highest_point_within_roi[1]:
+            highest_point_within_roi = highest_point
+            highest_point_time = current_time
+
+            # Draw the highest point on the frame
+        if highest_point_within_roi[1] != np.inf:
+            cv2.circle(frame, highest_point_within_roi, 3, (0, 0, 255), -1)
+
+            # Draw ROI rectangle
+    cv2.rectangle(frame, (ROI_X, ROI_Y), (ROI_X + ROI_WIDTH, ROI_Y + ROI_HEIGHT), (0, 255, 0), 2)
+
+    # Resize and display the frame
+    resized_frame = cv2.resize(frame, (960, 540))
+    cv2.imshow('Original Video with ROI', resized_frame)
+
+    # Check if rotation is completed
+    if SimplifiedControls.arduino.inWaiting() > 0 and SimplifiedControls.arduino.readline().decode().strip() == "Done" and not rotation_completed:
+        rotation_completed = True
+        print(f"Rotation completed at: {time.time()}")
+
+
+def start_video_processing_with_rotation():
+    global highest_point_within_roi, highest_point_time, rotation_start_time, rotation_completed, delay
+    highest_point_within_roi = (0, np.inf)
+    rotation_started = False
+    rotation_completed = False
+
+    # Initialize the camera and start grabbing
+    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+    camera.Open()
+    converter = pylon.ImageFormatConverter()
+    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+    # Print the current time as the video capture start time
+    video_capture_start_time = time.time()
+    print(f"Video capture start time: {video_capture_start_time}")
+
+    # Start grabbing frames from the camera
+    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+
+    # Introduce a slight delay to ensure the camera is ready (if necessary)
+    time.sleep(0.1)  # Adjust based on your system's needs
+
+    # Send the rotation command and record the rotation start time
+    SimplifiedControls.Actuation(4, 360, 1, 1, VideoCapture = 1)
+    rotation_start_time = time.time()
+    print(
+        f"Rotation command sent at: {rotation_start_time}, delay: {rotation_start_time - video_capture_start_time:.2f} seconds")
+    delay = rotation_start_time - video_capture_start_time
+    while camera.IsGrabbing() and not rotation_completed:
+        grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+        if grabResult.GrabSucceeded():
+            image = converter.Convert(grabResult)
+            frame = image.GetArray()
+            current_time = time.time() - rotation_start_time
+            process_frame(frame, current_time)
+            grabResult.Release()
+
+            if cv2.waitKey(1) & 0xFF == ord('q') or rotation_completed:
+                break
+        else:
+            print("Failed to grab image.")
+
+    calculate_highest_point()
+
+    SimplifiedControls.Actuation(4, (calculate_highest_point()), 1, 1)
+    # Wait for this rotation to complete as well
+    time.sleep(5.0)
+
+    rotation_completed = True
+    print(f"Rotated to {calculate_highest_point()} degrees to inspect highest point")
+
+
+    # Cleanup
+    camera.StopGrabbing()
+    camera.Close()
+    cv2.destroyAllWindows()
+
+
+def calculate_highest_point():
+    global highest_point_within_roi, highest_point_time, rotation_start_time, delay
+    rotation_duration = time.time() - rotation_start_time
+    if highest_point_time != 0:
+        angle_of_highest_point = int(((abs(highest_point_time)) / (rotation_duration)) * 360)  # highest_point + delay
+        if angle_of_highest_point > 360:
+            angle_of_highest_point = angle_of_highest_point - 360
+    else:
+        angle_of_highest_point = 0
+    print(f"Highest point: {highest_point_within_roi}, Angle: {angle_of_highest_point} degrees")
+    return angle_of_highest_point
+
+
+def capture_and_undistort_image(camera_matrix=camera_matrix, dist_coeffs=dist_coeffs, show_roi=True):
+    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+    camera.Open()
+
+    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+    converter = pylon.ImageFormatConverter()
+    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+    converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+    if camera.IsGrabbing():
+        grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+        if grabResult.GrabSucceeded():
+            image = converter.Convert(grabResult)
+            frame = image.GetArray()
+            grabResult.Release()
+            camera.Close()
+            # Undistort the captured frame
+            undistorted_img = cv2.undistort(frame, camera_matrix, dist_coeffs)
+
+            return undistorted_img
+        else:
+            camera.Close()
+            raise IOError("Failed to grab frame")
+    camera.Close()
+    raise IOError("Camera is not grabbing")
+
+
+def detect_endoscope_nozzle(image, blur_value, block_size, C, Dila, ROI_X, ROI_Y, ROI_WIDTH, ROI_HEIGHT):
+    #undistorted_img = capture_and_undistort_image(camera_matrix, dist_coeffs) 
+    image = capture_and_undistort_image(camera_matrix, dist_coeffs)
+    ROI_X, ROI_Y, ROI_WIDTH, ROI_HEIGHT = roi_coords
+    # Image preprocessing within the ROI
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (blur_value, blur_value), 0)
+    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size, C)
+
+    # Create and apply a mask for the ROI
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[ROI_Y:ROI_Y + ROI_HEIGHT, ROI_X:ROI_X + ROI_WIDTH] = 255
+    masked_thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
+
+    # Dilate the masked threshold image
+    kernel = np.ones((Dila, Dila), np.uint8)
+    dilated = cv2.dilate(masked_thresh, kernel, iterations=1)
+    # cv2.imshow("dilated", dilated)
+    # Find contours5
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    # Draw the ROI rectangle on the original image
+    cv2.rectangle(image, (ROI_X, ROI_Y), (ROI_X + ROI_WIDTH, ROI_Y + ROI_HEIGHT), (0, 255, 0), 2)
+    # Draw vertical lines and find intersections
+
+    significantly_deviated_points = []
+    upper_intersections = []
+    lower_intersections = []
+    first_intersection = None
+    last_intersection_x = None
+    vertical_spacing = 20  # spacing between lines
+
+    # Integrate the find_intersection function
+    def find_intersection(image, x, start_y, step, contours):
+        """
+        Find the first intersection of a vertical line with the contours.
+        """
+        y = start_y
+        while 0 <= y < image.shape[0]:
+            if any(cv2.pointPolygonTest(contour, (x, y), False) >= 0 for contour in contours):
+                return x, y
+            y += step
+        return None
+
+    for x in range(ROI_X, ROI_X + ROI_WIDTH, vertical_spacing):
+        intersection = find_intersection(image, x, ROI_Y, 2, contours)
+        if intersection:
+            cv2.line(image, (x, ROI_Y), intersection, (0, 255, 255), 1)
+            last_intersection_x = intersection[0]
+            if first_intersection is None:
+                first_intersection = intersection
+                cv2.circle(image, first_intersection, 5, (255, 0, 0), -1)  # Mark the first intersection point
+
+            deviation_y = first_intersection[1] - intersection[1]
+            if abs(deviation_y) > 2:
+                cv2.circle(image, intersection, 3, (0, 0, 255), -1)  # Mark significant deviation points
+            significantly_deviated_points.append((intersection[0], deviation_y))
+
+        # Calculate the length of the endoscope from the first to the most right intersection
+    if first_intersection and last_intersection_x:
+        length_pixels = last_intersection_x - first_intersection[0]
+        length_mm = length_pixels / PPMMw  # Convert pixels to millimeters using pixels per millimeter width (PPMMw)
+
+        print(f"Endoscope Length: {length_mm:.2f} mm")
+
+        # Draw reference line
+    if first_intersection:
+        cv2.line(image, (ROI_X, first_intersection[1]), (ROI_X + ROI_WIDTH, first_intersection[1]),
+                 (255, 255, 0), 2)
+
+    cv2.rectangle(image, (ROI_X, ROI_Y), (ROI_X + ROI_WIDTH, ROI_Y + ROI_HEIGHT), (0, 255, 0), 2)
+    imS = cv2.resize(image, (960, 540))  # Resize image
+    cv2.imshow("Detected Nozzle with Significant Deviation Points", imS)
+
+    for x in range(ROI_X, ROI_X + 500, 20):
+        bottom_intersection = find_intersection(image, x, ROI_Y + ROI_HEIGHT, -2, contours)
+        if bottom_intersection:
+            cv2.line(image, (x, ROI_Y + ROI_HEIGHT), bottom_intersection, (0, 255, 255), 1)
+            cv2.circle(image, bottom_intersection, 3, (0, 255, 255), -1)
+            lower_intersections.append(bottom_intersection)
+
+        top_intersection = find_intersection(image, x, ROI_Y, 1, contours)
+        if top_intersection:
+            cv2.line(image, (x, ROI_Y), top_intersection, (255, 0, 0), 1)
+            cv2.circle(image, top_intersection, 3, (255, 0, 0), -1)
+            upper_intersections.append(top_intersection)
+
+    cv2.rectangle(image, (ROI_X, ROI_Y), (ROI_X + ROI_WIDTH, ROI_Y + ROI_HEIGHT), (0, 255, 0), 2)
+    differences = []
+
+    for upper, lower in zip(upper_intersections, lower_intersections):
+        if upper[0] == lower[0]:
+            pixel_difference = abs(upper[1] - lower[1])
+            mm_difference = pixel_difference / PPMMh
+            differences.append((pixel_difference, mm_difference))
+
+    avg_pixel_difference = sum([d[0] for d in differences]) / len(differences) if differences else 0
+    avg_mm_difference = sum([d[1] for d in differences]) / len(differences) if differences else 0
+    diam_mm = avg_mm_difference
+
+    print(f"Average pixel diameter: {avg_pixel_difference} pixels")
+    print(f"Average mm diameter: {avg_mm_difference} millimeters")
+
+
+    return first_intersection, significantly_deviated_points, diam_mm, length_mm
+
+
+def remove_outliers(points):
+    deviations = [point[1] for point in points]
+
+    # Return an empty list if there are no points
+    if not deviations:
+        return []
+
+        # Calculate the first and third quartiles (Q1, Q3)
+    Q1 = np.percentile(deviations, 5)
+    Q3 = np.percentile(deviations, 95)
+    IQR = Q3 - Q1
+
+    # Define lower and upper boundary for filtering
+    lower_boundary = Q1 - 1 * IQR
+    upper_boundary = Q3 + 1 * IQR
+
+    # Filter out points outside the boundaries
+    filtered_points = [point for point in points if lower_boundary <= point[1] <= upper_boundary]
+    return filtered_points
+
+
+def convert_to_mm(x, y):
+    return x / PPMMw, y / PPMMh
+
+
+def FindRunout():
+
+    undistorted_img = capture_and_undistort_image(camera_matrix, dist_coeffs)
+    orig_image = undistorted_img
+    # Define the ROI
+    roi_coords = (ROI_Y, ROI_X, ROI_Y + ROI_HEIGHT, ROI_X + ROI_WIDTH)
+    first_intersection, significant_points_pixels, diam_mm, length_mm = detect_endoscope_nozzle(
+        orig_image,
+        blur_value,
+        block_size,
+        C,
+        Dila,
+        roi_coords[1],  # ROI_X
+        roi_coords[0],  # ROI_Y
+        roi_coords[3] - roi_coords[1],  # ROI_WIDTH
+        roi_coords[2] - roi_coords[0])  # ROI_HEIGHT)
+
+    # Convert points from pixels to mm
+    significant_points_mm = [convert_to_mm(x, y) for x, y in significant_points_pixels]
+
+    # Remove outliers
+    filtered_points_mm = remove_outliers(significant_points_mm)
+
+    max_deviation_point_mm = max(filtered_points_mm, key=lambda point: abs(point[1]), default=None)  
+    if max_deviation_point_mm:
+        index_of_max_deviation = significant_points_mm.index(max_deviation_point_mm)
+        max_deviation_point_pixel = significant_points_pixels[index_of_max_deviation]
+
+    print("Largest absolute Y deviation (mm):", (max_deviation_point_mm[1])) #subtracting the diameter because of camera wonkyness???
+    print("Largest absolute Y deviation (pixels):", max_deviation_point_pixel[1])
+
+    # Analyze the filtered points
+    if abs(max_deviation_point_mm[1]) > 2:
+        endoscope_status = "The endoscope is bent"
+    else:
+        endoscope_status = "The endoscope is straight"
+
+    # Create a simple Tkinter window to display the results
+    root = tk.Tk()
+    root.title("Runout Analysis Results")
+
+    status_label = tk.Label(root, text=endoscope_status)
+    status_label.pack()
+
+    mm_label = tk.Label(root, text=f"Largest absolute Y deviation (mm): {((max_deviation_point_mm[1])):.2f}")
+    mm_label.pack()
+
+    # Start the Tkinter event loop
+    root.mainloop()
+
+    # Save the filtered significantly deviated points into a CSV file
+    with open("filtered_points_mm.csv", "w", newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["X (mm)", "Deviation from Origin Y (mm)"])
+        writer.writerows(filtered_points_mm)
+
+    return filtered_points_mm, max_deviation_point_mm, orig_image, endoscope_status, length_mm, diam_mm
+
+
+def rotate_endoscope_backwards_90_degrees():
+    SimplifiedControls.Actuation(4, 90, 1)
+    print(f"Rotating 90 degrees CounterClockwise")
+
+start_video_processing_with_rotation()
+FindRunout()
+rotate_endoscope_backwards_90_degrees()
