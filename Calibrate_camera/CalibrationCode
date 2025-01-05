@@ -1,0 +1,128 @@
+import cv2
+import numpy as np
+import glob
+import os
+import json
+
+def calibrate(dirpath, prefix, image_format, square_size, num_corners_x=12, num_corners_y = 7):  #22 x 12 works of the 1st set of 8mm lens pictures...
+    """
+    Perform camera calibration using multiple images of a chessboard pattern.
+    :param dirpath: The directory path where the calibration images are stored.
+    :param prefix: The common prefix of the image filenames.
+    :param image_format: The file format of the images (e.g., 'jpg', 'png').
+    :param square_size: The side length of the squares on the chessboard.
+    :param num_corners_x: The number of internal corners along the width of the chessboard.
+    :param num_corners_y: The number of internal corners along the height of the chessboard.
+    :return: A list containing the calibration success flag, camera matrix, distortion coefficients, PPMMx, and PPMMy.
+    """
+    # Define the criteria for corner sub-pixel accuracy
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+
+    # Prepare object points, like (0,0,0), (1,0,0), (2,0,0) ....,(num_corners_x-1, num_corners_y-1, 0)
+    objp = np.zeros((num_corners_y * num_corners_x, 3), np.float32)
+    objp[:, :2] = np.mgrid[0:num_corners_x, 0:num_corners_y].T.reshape(-1, 2) * square_size
+    
+    # Arrays to store object points and image points from all the images.
+    objpoints = []  # 3d points in real-world space
+    imgpoints = []  # 2d points in image plane
+    
+    # Construct the file search pattern and get list of image files
+    file_pattern = os.path.join(dirpath, f"{prefix}*.{image_format}")
+    images = glob.glob(file_pattern)
+    print("Number of Images Found:", len(images))
+    
+    for fname in images:
+        img = cv2.imread(fname)
+        if img is None:
+            print("Failed to load image:", fname)
+            continue  # Skip to the next iteration
+        
+        img_height, img_width = img.shape[:2]
+        print("Image Height:", img_height)
+        print("Image Width:", img_width)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Find the chessboard corners
+        ret, corners = cv2.findChessboardCorners(gray, (num_corners_x, num_corners_y), None)
+        print("Chessboard Corners Detected in Image", fname, ":", ret)
+        
+        # If found, add object points, image points (after refining them)
+        if ret:
+            objpoints.append(objp)
+            corners2 = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+            imgpoints.append(corners2)
+            
+            # Draw and display the corners
+            img = cv2.drawChessboardCorners(img, (num_corners_x, num_corners_y), corners2, ret)
+            ims = cv2.resize(img,(960,540))
+            cv2.imshow('Corners', ims)
+            cv2.waitKey(4000)  # Wait for a key press
+    cv2.destroyAllWindows()  # Close the image window
+
+    # Perform camera calibration
+    ret, mtx, dist, _, _ = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
+    
+    if not ret:
+        print("Camera calibration failed.")
+        return None
+    
+    # Calculate PPMM (Pixels Per Millimeter) if chessboard was found
+    if imgpoints:
+        # Reshape corners array for easier indexing
+        reshaped_imgpoints = imgpoints[0].reshape(num_corners_y, num_corners_x, 2)  # Note: Use num_corners_y, num_corners_x in reshape if num_corners_y and num_corners_x represent the number of internal corners in the respective dimensions
+        
+        # Calculate average difference in pixels between adjacent points in x direction
+        diff_x = np.mean(np.diff(reshaped_imgpoints[:, :, 0], axis=1))
+        
+        # Calculate average difference in pixels between adjacent points in y direction
+        diff_y = np.mean(np.diff(reshaped_imgpoints[:, :, 1], axis=0))
+        
+        # Calculate Pixels Per Millimeter (PPMM)
+        PPMMx = abs(diff_x / square_size)
+        PPMMy = abs(diff_y / square_size)
+        
+    return {
+        'Reprojection Error': ret,
+        'Camera_Matrix': mtx,
+        'Distortion_Coefficients': dist,
+        'PPMMx': PPMMx,
+        'PPMMy': PPMMy,        
+    }
+
+def save_calibration_results(results, filename):
+    data = {
+        'Camera_Matrix': results['Camera_Matrix'].tolist(),
+        'Distortion_Coefficients': results['Distortion_Coefficients'].tolist(),
+        'PPMMx': results['PPMMx'],
+        'PPMMy': results['PPMMy']
+    }
+    with open(filename, 'w') as f:
+        json.dump(data, f)
+
+# Example usage:
+
+#dirpath = 'C:/Users/nigos/Downloads/CalibrationImages2'
+dirpath = r"C:\Users\GMShe\Pictures\Basler_Calibration_4_10_2024"
+#dirpath = r"C:\Users\GMShe\Pictures\Balser Calibration 2.21.24"
+#dirpath = r"C:\Users\George M Shelton\Downloads\CalibrationImages7\CalibrationImages7"
+
+
+prefix = "Image"  # e.g., if your images are named img001.jpg, img002.jpg, etc., then prefix would be "img"
+image_format = "jpg"
+square_size = 22  # The side length of the squares on the chessboard in some real-world units, e.g., millimeters
+
+calibration_results = calibrate(dirpath, prefix, image_format, square_size)
+if calibration_results:
+    #print("Calibration Results:", calibration_results)
+    for key, value in calibration_results.items():
+        if key == "Camera_Matrix":
+            print(key + ":")
+            print(value)
+        else:
+            print(key + ":", value)
+    save_calibration_results(calibration_results, r"C:\Users\GMShe\Pictures\Basler_Calibration_4_10_2024\Basler_Calibration_4_10_2024.json")
+    #save_calibration_results(calibration_results, r"C:\Users\GMShe\Pictures\Basler_Calibration_3_19_2024\Basler_Calibration_3_19_2024.json")
+    
+else:
+    print("Calibration Failed.")
