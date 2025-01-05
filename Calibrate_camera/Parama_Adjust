@@ -1,0 +1,55 @@
+import cv2
+from pypylon import pylon
+import numpy as np
+
+def adjust_parameters(frame):
+    maxValue = cv2.getTrackbarPos('maxValue', 'Adjustments')
+    blur_size = cv2.getTrackbarPos('Blur Size', 'Adjustments') * 2 + 1
+    blockSize = cv2.getTrackbarPos('Adaptive BlockSize', 'Adjustments') * 2 + 3
+    C = cv2.getTrackbarPos('Adaptive C', 'Adjustments')
+    dilate_size = cv2.getTrackbarPos('Dilate Size', 'Adjustments') + 1
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+    thresh = cv2.adaptiveThreshold(blurred, maxValue, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, blockSize, C)
+    dilated = cv2.dilate(thresh, np.ones((dilate_size, dilate_size), np.uint8), iterations=1)
+    resized_dilated = cv2.resize(dilated, (960, 540))  # Resize the dilated frame
+
+    cv2.imshow('Adjusted Edges', resized_dilated)
+
+def on_trackbar_change(val):
+    # This function will be called every time a trackbar position is changed.
+    # For this example, it doesn't need to do anything.
+    pass
+
+cv2.namedWindow('Adjustments')
+cv2.createTrackbar('maxValue', 'Adjustments', 150, 255, on_trackbar_change)
+cv2.createTrackbar('Blur Size', 'Adjustments', 1, 15, on_trackbar_change)
+cv2.createTrackbar('Adaptive BlockSize', 'Adjustments', 7, 23, on_trackbar_change)
+cv2.createTrackbar('Adaptive C', 'Adjustments', 2, 10, on_trackbar_change)
+cv2.createTrackbar('Dilate Size', 'Adjustments', 1, 10, on_trackbar_change)
+
+# Initialize camera
+camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+camera.Open()
+camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+converter = pylon.ImageFormatConverter()
+converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+while camera.IsGrabbing():
+    grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+
+    if grabResult.GrabSucceeded():
+        # Convert to OpenCV format
+        image = converter.Convert(grabResult)
+        frame = image.GetArray()
+        adjust_parameters(frame)  # Apply image processing on the frame
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):  # Exit loop if 'q' is pressed
+            break
+    grabResult.Release()
+
+camera.StopGrabbing()
+camera.Close()
+cv2.destroyAllWindows()
