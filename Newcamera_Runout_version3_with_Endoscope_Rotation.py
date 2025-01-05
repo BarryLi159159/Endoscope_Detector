@@ -6,15 +6,14 @@ from pypylon import pylon
 import serial
 import time
 
-arduino = serial.Serial('COM4', 9600, timeout=5)
+arduino = serial.Serial('COM11', 9600, timeout=5)
 
 time.sleep(2)
-
 
 # Configuration values 
 MANUAL_ROI_START_X = 400  # X coordinate where the ROI starts
 MANUAL_ROI_START_Y = 1050  # Y coordinate where the ROI starts
-MANUAL_ROI_WIDTH = 2000    # The width of the ROI
+MANUAL_ROI_WIDTH = 1500    # The width of the ROI
 MANUAL_ROI_HEIGHT = 150    # The height of the ROI
 
 ROI_X = MANUAL_ROI_START_X  # X coordinate where the ROI starts
@@ -22,7 +21,7 @@ ROI_Y = MANUAL_ROI_START_Y  # Y coordinate where the ROI starts
 ROI_WIDTH = MANUAL_ROI_WIDTH   # The width of the ROI
 ROI_HEIGHT = MANUAL_ROI_HEIGHT     # The height of the ROI
 
-filename = r'C:\Users\Administrator\Downloads\Basler 8mm Lens.json'
+filename = r"C:\Users\GMShe\Pictures\Basler Calibration 8mm 2\Basler 8mm Lens 2.json"
 with open(filename, 'r') as f:
     calibration_data = json.load(f)
 
@@ -217,7 +216,7 @@ def FindRunout():
 
 def RotateEndoscope(Angle,Direction):
     Speed = 99 #Do not change this, max speed without acceleration, which I don't think is needed given what we are doing 
-    Motor = 2
+    Motor = 3
     StepsPerDegree =  13.5 #1600 steps = 1 rotation
     Steps = Angle * StepsPerDegree
     dataStr = str(Motor) + str(Direction) + str(Speed) + str(Steps) + "\n" #the order in which the numbers are sent to the arduino Do No Touch
@@ -290,7 +289,7 @@ def FindRunoutAndRotateEndoscope(Readings, Angle):
         print (reads)
 
 
+FindRunoutAndRotateEndoscope(4,30)
+#RotateEndoscope(650,1)
 
 
-
-FindRunoutAndRotateEndoscope(3,90)
