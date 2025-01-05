@@ -12,6 +12,5 @@ Hardware: Assemble with a 4K camera, NEMA stepper motors, TB6600 drivers, and Ar
 Software: Install Python 3.8, Arduino IDE, and dependencies (opencv-python, numpy, serial).
 
 Contributors
-Chenhao Li: Computer Vision Lead
-Team Members: Abigail Clemence, Nikita Igoshin, Praniva Pradhan, Jessica Rhodes, George Shelton
+Team Members: Abigail Clemence, Nikita Igoshin, Praniva Pradhan, Jessica Rhodes, George Shelton, Chenhao Li
 Advisor: Prof. Pradeep Radhakrishnan, Henke Sass Wolf of America
