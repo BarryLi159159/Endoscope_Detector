@@ -1,5 +1,6 @@
 Endoscope Measurement and Straightening System
 
+
 This repository contains the computer vision and control code for an autonomous system that measures and straightens medical-grade endoscopes. Developed as part of an MQP at WPI in collaboration with Henke Sass Wolf of America, this project aims to improve accuracy and efficiency in endoscope repair.
 
 Features
